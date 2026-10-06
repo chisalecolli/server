@@ -84,7 +84,7 @@ func initDB() {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		user_id INTEGER NOT NULL,
 		friend_id INTEGER NOT NULL,
-		status TEXT NOT NULL, -- 'pending', 'accepted'
+		status TEXT NOT NULL,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE(user_id, friend_id)
 	);
@@ -103,7 +103,7 @@ func initDB() {
 	CREATE TABLE IF NOT EXISTS room_members (
 		room_id INTEGER NOT NULL,
 		user_id INTEGER NOT NULL,
-		role TEXT DEFAULT 'member', -- 'owner', 'mod', 'speaker', 'member'
+		role TEXT DEFAULT 'member',
 		last_ping DATETIME DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY(room_id, user_id)
 	);
@@ -185,7 +185,6 @@ func initDB() {
 		log.Fatal("DB Schema Error:", err)
 	}
 
-	// Create default public rooms if none exist
 	var roomCount int
 	db.QueryRow("SELECT COUNT(*) FROM rooms").Scan(&roomCount)
 	if roomCount == 0 {
@@ -197,7 +196,7 @@ func initDB() {
 }
 
 // -------------------------------------------------------------
-// HELPERS (Presence, Relative Time, Gamified Level)
+// HELPERS
 // -------------------------------------------------------------
 func generateToken() string {
 	b := make([]byte, 16)
@@ -253,7 +252,6 @@ func authenticate(r *http.Request) (int64, string, error) {
 		return 0, "", fmt.Errorf("unauthorized")
 	}
 
-	// Update presence
 	db.Exec("UPDATE users SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?", uid)
 	return uid, uname, nil
 }
@@ -294,10 +292,9 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read Cloudflare auto-detected country
 	country := r.Header.Get("CF-IPCountry")
 	if country == "" || len(country) != 2 {
-		country = "MW" // Default to Malawi if local
+		country = "MW"
 	}
 
 	hash, _ := bcrypt.GenerateFromPassword([]byte(req.Pass), bcrypt.DefaultCost)
@@ -376,7 +373,6 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Increment profile views if someone else is viewing
 	if targetID != uid {
 		db.Exec("UPDATE users SET profile_views = profile_views + 1 WHERE id = ?", targetID)
 		views++
@@ -389,25 +385,24 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 
 	daysActive := int(time.Since(createdAt).Hours() / 24)
 	rankTitle, rankLevel := calculateLevel(postCount, likesCount, daysActive)
-
 	isOnline := time.Since(lastActive) < 60*time.Second
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"id":       targetID,
-		"u":        uname,
-		"dn":       dname,
-		"bio":      bio,
-		"c":        country,
-		"online":   isOnline,
-		"act":      activity,
-		"views":    views,
-		"posts":    postCount,
-		"likes":    likesCount,
-		"friends":  friendCount,
-		"rank":     rankTitle,
-		"lvl":      rankLevel,
-		"seen":     formatTimeAgo(lastActive),
-		"is_me":    targetID == uid,
+		"id":      targetID,
+		"u":       uname,
+		"dn":      dname,
+		"bio":     bio,
+		"c":       country,
+		"online":  isOnline,
+		"act":     activity,
+		"views":   views,
+		"posts":   postCount,
+		"likes":   likesCount,
+		"friends": friendCount,
+		"rank":    rankTitle,
+		"lvl":     rankLevel,
+		"seen":    formatTimeAgo(lastActive),
+		"is_me":   targetID == uid,
 	})
 }
 
@@ -430,10 +425,12 @@ func handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 // -------------------------------------------------------------
 func handlePosts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	uid, myName, _ := authenticate(r)
+	uid, _, _ := authenticate(r)
 
 	if r.Method == http.MethodGet {
-		db.Exec("UPDATE users SET current_activity = 'Browsing Feed' WHERE id = ?", uid)
+		if uid > 0 {
+			db.Exec("UPDATE users SET current_activity = 'Browsing Feed' WHERE id = ?", uid)
+		}
 
 		rows, err := db.Query(`
 			SELECT p.id, u.username, u.country_code, u.last_active_at, p.content, p.media_url, p.created_at,
@@ -658,7 +655,7 @@ func handleRooms(w http.ResponseWriter, r *http.Request) {
 
 func handleRoomChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	uid, myName, err := authenticate(r)
+	uid, _, err := authenticate(r)
 	if err != nil {
 		http.Error(w, `{"err":"Unauthorized"}`, 401)
 		return
@@ -666,7 +663,6 @@ func handleRoomChat(w http.ResponseWriter, r *http.Request) {
 
 	roomID, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
 
-	// Check if banned
 	var banned int
 	db.QueryRow("SELECT COUNT(*) FROM room_bans WHERE room_id = ? AND user_id = ?", roomID, uid).Scan(&banned)
 	if banned > 0 {
@@ -674,7 +670,6 @@ func handleRoomChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update presence in room
 	db.Exec(`
 		INSERT INTO room_members(room_id, user_id, role, last_ping)
 		VALUES(?, ?, 'member', CURRENT_TIMESTAMP)
@@ -686,11 +681,9 @@ func handleRoomChat(w http.ResponseWriter, r *http.Request) {
 	db.Exec("UPDATE users SET current_activity = ? WHERE id = ?", "In '"+roomName+"'", uid)
 
 	if r.Method == http.MethodGet {
-		// Online count
 		var onlineCount int
 		db.QueryRow("SELECT COUNT(*) FROM room_members WHERE room_id = ? AND last_ping >= datetime('now', '-60 seconds')", roomID).Scan(&onlineCount)
 
-		// Check typing state
 		typingMu.Lock()
 		typer := roomTyping[roomID]
 		typingMu.Unlock()
@@ -727,7 +720,6 @@ func handleRoomChat(w http.ResponseWriter, r *http.Request) {
 			rows.Scan(&mi.ID, &mi.User, &mi.Country, &lastActive, &mi.Text, &mi.Media, &createdAt, &mi.Role)
 			mi.Online = time.Since(lastActive) < 60*time.Second
 			mi.Time = createdAt.Format("15:04")
-			// Reverse order to make newest at bottom
 			msgs = append([]MsgItem{mi}, msgs...)
 		}
 
@@ -740,7 +732,6 @@ func handleRoomChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost {
-		// Check mute status
 		var mutedUntil time.Time
 		var isGhost int
 		err := db.QueryRow("SELECT muted_until, is_ghost FROM room_mutes WHERE room_id = ? AND user_id = ?", roomID, uid).Scan(&mutedUntil, &isGhost)
@@ -749,13 +740,11 @@ func handleRoomChat(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, `{"err":"You are muted in this room"}`, 403)
 				return
 			}
-			// Ghost mute: pretend it succeeded
 			w.WriteHeader(201)
 			w.Write([]byte(`{"ok":true}`))
 			return
 		}
 
-		// Check Stage / Listen-Only Mode
 		var stageMode int
 		var userRole string
 		db.QueryRow("SELECT stage_mode FROM rooms WHERE id = ?", roomID).Scan(&stageMode)
@@ -777,7 +766,6 @@ func handleRoomChat(w http.ResponseWriter, r *http.Request) {
 
 		db.Exec("INSERT INTO room_messages(room_id, user_id, content, media_url) VALUES(?, ?, ?, ?)", roomID, uid, req.Text, req.Media)
 
-		// Clear typing state
 		typingMu.Lock()
 		delete(roomTyping, roomID)
 		typingMu.Unlock()
@@ -788,7 +776,7 @@ func handleRoomChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleTyping(w http.ResponseWriter, r *http.Request) {
-	uid, uname, err := authenticate(r)
+	_, uname, err := authenticate(r)
 	if err != nil {
 		return
 	}
@@ -798,14 +786,14 @@ func handleTyping(w http.ResponseWriter, r *http.Request) {
 	roomTyping[roomID] = uname
 	typingMu.Unlock()
 
-	go func(rid int64) {
+	go func(rid int64, username string) {
 		time.Sleep(5 * time.Second)
 		typingMu.Lock()
-		if roomTyping[rid] == uname {
+		if roomTyping[rid] == username {
 			delete(roomTyping, rid)
 		}
 		typingMu.Unlock()
-	}(roomID)
+	}(roomID, uname)
 
 	w.Write([]byte(`{"ok":true}`))
 }
@@ -815,7 +803,7 @@ func handleTyping(w http.ResponseWriter, r *http.Request) {
 // -------------------------------------------------------------
 func handleModerate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	uid, myName, err := authenticate(r)
+	uid, _, err := authenticate(r)
 	if err != nil {
 		http.Error(w, `{"err":"Unauthorized"}`, 401)
 		return
@@ -823,15 +811,14 @@ func handleModerate(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		RoomID     int64  `json:"room_id"`
-		Action     string `json:"action"` // 'mute', 'ghost_mute', 'kick', 'ban', 'nuke', 'wipe', 'stage_toggle', 'set_role', 'warn'
+		Action     string `json:"action"`
 		TargetUser string `json:"target_user"`
-		Duration   int    `json:"duration"` // in minutes
+		Duration   int    `json:"duration"`
 		Role       string `json:"role"`
 		Reason     string `json:"reason"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
-	// Verify mod/owner permissions
 	var myRole string
 	db.QueryRow("SELECT role FROM room_members WHERE room_id = ? AND user_id = ?", req.RoomID, uid).Scan(&myRole)
 	if myRole != "owner" && myRole != "mod" {
@@ -905,7 +892,6 @@ func handleModerate(w http.ResponseWriter, r *http.Request) {
 		logModAction(req.RoomID, uid, "Warning", req.TargetUser, fmt.Sprintf("Strike %d: %s", strikeCount, req.Reason))
 		sendNotification(targetID, uid, "mod", "⚠️ Warning Issued", fmt.Sprintf("Strike %d/3: %s", strikeCount, req.Reason), req.RoomID)
 
-		// Auto-punish on 3 strikes
 		if strikeCount >= 3 {
 			db.Exec("INSERT OR IGNORE INTO room_bans(room_id, user_id) VALUES(?, ?)", req.RoomID, targetID)
 		}
@@ -928,7 +914,6 @@ func handleDirectMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		targetUser := r.URL.Query().Get("u")
 		if targetUser == "" {
-			// Fetch Inbox conversation list
 			rows, err := db.Query(`
 				SELECT u.username, u.country_code, u.last_active_at, dm.content, dm.created_at,
 				       (SELECT COUNT(*) FROM direct_messages WHERE sender_id = u.id AND receiver_id = ? AND is_read = 0) as unread
@@ -967,7 +952,6 @@ func handleDirectMessages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Fetch specific 1-on-1 thread
 		var targetID int64
 		db.QueryRow("SELECT id FROM users WHERE username = ?", targetUser).Scan(&targetID)
 		db.Exec("UPDATE direct_messages SET is_read = 1 WHERE sender_id = ? AND receiver_id = ?", targetID, uid)
@@ -1035,7 +1019,7 @@ func handleFriends(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mode := r.URL.Query().Get("mode") // 'list', 'requests', 'suggestions', 'request', 'accept'
+	mode := r.URL.Query().Get("mode")
 
 	switch mode {
 	case "list":
@@ -1066,7 +1050,6 @@ func handleFriends(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"friends": friends})
 
 	case "suggestions":
-		// Smart Suggestions: Mutual friends + Shared chatrooms
 		rows, _ := db.Query(`
 			SELECT u.username, u.country_code, u.last_active_at,
 			       (SELECT COUNT(*) FROM room_members rm1 JOIN room_members rm2 ON rm1.room_id = rm2.room_id WHERE rm1.user_id = ? AND rm2.user_id = u.id) as shared_rooms
@@ -1126,7 +1109,6 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Search users by username or phone
 	uRows, _ := db.Query("SELECT username, country_code, last_active_at FROM users WHERE username LIKE ? OR phone_number LIKE ? LIMIT 10", "%"+q+"%", "%"+q+"%")
 	defer uRows.Close()
 
@@ -1144,7 +1126,6 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		uList = append(uList, ur)
 	}
 
-	// Search rooms
 	rRows, _ := db.Query("SELECT id, name, topic FROM rooms WHERE name LIKE ? OR topic LIKE ? LIMIT 5", "%"+q+"%", "%"+q+"%")
 	defer rRows.Close()
 
@@ -1201,7 +1182,6 @@ func handleNotifications(w http.ResponseWriter, r *http.Request) {
 		notifs = append(notifs, ni)
 	}
 
-	// Mark all as read
 	db.Exec("UPDATE notifications SET is_read = 1 WHERE user_id = ?", uid)
 	json.NewEncoder(w).Encode(map[string]interface{}{"notifications": notifs})
 }
@@ -1242,10 +1222,8 @@ func main() {
 	initDB()
 	defer db.Close()
 
-	// Static uploads directory
 	http.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("./uploads"))))
 
-	// API Routes
 	http.HandleFunc("/api/register", handleRegister)
 	http.HandleFunc("/api/login", handleLogin)
 	http.HandleFunc("/api/profile", handleProfile)
