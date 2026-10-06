@@ -1,0 +1,14 @@
+# Compiled binaries
+server
+server.exe
+*.exe
+*.out
+
+# SQLite database files
+*.db
+*.db-journal
+
+# OS and IDE files
+.DS_Store
+.vscode/
+.idea/
